@@ -134,6 +134,11 @@ wait_format_changed(MMAL_PORT_T *ctrl /*unused*/, MMAL_PORT_T *out)
     return MMAL_ENOSYS;                 /* timeout → format never arrived */
 }
 
+/* -------------------------------------------------  */
+/* helper (only if VC headers don’t have ALIGN_UP)    */
+#ifndef ALIGN_UP
+#   define ALIGN_UP(x,a)  (((x)+((a)-1)) & ~((a)-1))
+#endif
 
   
 
@@ -153,93 +158,126 @@ static void cb_buffer(MMAL_PORT_T *port, MMAL_BUFFER_HEADER_T *buf)
     mmal_buffer_header_release(buf);
 }
 
-
-
-/* ───── worker thread: decode file → egl_render → EGLImage ───── */
+/* ─── worker thread: decode file → image_fx → egl_render ─────────── */
 static void *loader(void *arg)
 {
     const char *file = arg;
 
-/* 0. read compressed file into memory -------------------------------- */
+/* 0. read compressed file ----------------------------------------- */
     FILE *fp = fopen(file, "rb");
     if (!fp) { perror(file); return NULL; }
     fseek(fp, 0, SEEK_END); long sz = ftell(fp); rewind(fp);
-    uint8_t *data = malloc(sz);  fread(data, 1, sz, fp);  fclose(fp);
+    uint8_t *data = malloc(sz); fread(data, 1, sz, fp); fclose(fp);
 
-/* 1. create + enable components -------------------------------------- */
-    MMAL_COMPONENT_T *dec = NULL, *ren = NULL;  MMAL_CONNECTION_T *con = NULL;
+/* 1. components ---------------------------------------------------- */
+    MMAL_COMPONENT_T *dec = NULL, *fx = NULL, *ren = NULL;
+    MMAL_CONNECTION_T *c1  = NULL, *c2 = NULL;
     MMAL_STATUS_T st;
 
-    if ((st = mmal_component_create("vc.ril.image_decode", &dec))) {
-        fprintf(stderr, "decoder create %d\n", st); goto end;
-    }
-    if ((st = mmal_component_create("vc.ril.egl_render", &ren))) {
-        fprintf(stderr, "render  create %d\n", st); goto end;
-    }
+    if ((st = mmal_component_create("vc.ril.image_decode", &dec)))
+        { fprintf(stderr,"decoder create %d\n",st); goto end; }
+    if ((st = mmal_component_create("vc.ril.image_fx", &fx)))
+        { fprintf(stderr,"image_fx create %d\n",st); goto end; }
+    if ((st = mmal_component_create("vc.ril.egl_render", &ren)))
+        { fprintf(stderr,"render create %d\n",st); goto end; }
+
     mmal_component_enable(dec);
+    mmal_component_enable(fx);
     mmal_component_enable(ren);
 
-    MMAL_PORT_T *in  = dec->input[0];
-    MMAL_PORT_T *out = dec->output[0];
-    MMAL_PORT_T *rin = ren->input[0];
+    MMAL_PORT_T *dec_in  = dec->input[0];
+    MMAL_PORT_T *dec_out = dec->output[0];
+    MMAL_PORT_T *fx_in   =  fx->input[0];
+    MMAL_PORT_T *fx_out  =  fx->output[0];
+    MMAL_PORT_T *ren_in  = ren->input[0];
 
-/* 2. ask decoder to output opaque buffers (works for all still formats) */
-    out->format->encoding = MMAL_ENCODING_OPAQUE;
-    mmal_port_format_commit(out);
+/* 2. feed compressed stream into decoder -------------------------- */
+    MMAL_POOL_T *pool = mmal_port_pool_create(dec_in,
+                        dec_in->buffer_num_recommended,
+                        dec_in->buffer_size_recommended);
 
-    mmal_format_copy(rin->format, out->format);      /* same on render in   */
-    mmal_port_format_commit(rin);
-
-/* 3. enable ZERO-COPY on both ports so we get EGLImages directly ------- */
-    MMAL_PARAMETER_BOOLEAN_T zc = {{MMAL_PARAMETER_ZERO_COPY,sizeof zc}, 1};
-    mmal_port_parameter_set(out, &zc.hdr);
-    mmal_port_parameter_set(rin, &zc.hdr);
-
-/* 4. hint egl_render that we’ll pull the image out with glEGLImage… ---- */
-    MMAL_PARAMETER_EGL_IMAGE_T cfg = {{MMAL_PARAMETER_EGL_IMAGE,
-                                       sizeof cfg}, 1, {0}};
-    mmal_port_parameter_set(rin, &cfg.hdr);
-
-/* 5. hook callback, create + enable the tunnel ------------------------ */
-    rin->userdata = (void*)cb_buffer;
-    mmal_port_enable(rin, cb_buffer);
-
-    st = mmal_connection_create(&con, out, rin,
-            MMAL_CONNECTION_FLAG_TUNNELLING | MMAL_CONNECTION_FLAG_DIRECT);
-    if (!st) st = mmal_connection_enable(con);
-    if (st) { fprintf(stderr, "conn err %d\n", st); goto end; }
-
-/* 6. input pool and push the compressed bit-stream -------------------- */
-    MMAL_POOL_T *pool = mmal_port_pool_create(
-            in, in->buffer_num_recommended, in->buffer_size_recommended);
-
-    uint8_t *ptr = data;  long left = sz;
-    while (left) {
+    uint8_t *p = data, *e = data + sz;
+    while (p < e) {
         MMAL_BUFFER_HEADER_T *b = mmal_queue_get(pool->queue);
         if (!b) { usleep(1000); continue; }
-
-        int cp = left < b->alloc_size ? left : b->alloc_size;
+        int cp = (e - p) < b->alloc_size ? (e - p) : b->alloc_size;
         mmal_buffer_header_mem_lock(b);
-        memcpy(b->data, ptr, cp);
+        memcpy(b->data, p, cp);
         mmal_buffer_header_mem_unlock(b);
-
         b->length = cp;
-        ptr  += cp;  left -= cp;
-        if (!left) b->flags = MMAL_BUFFER_HEADER_FLAG_EOS;
-
-        mmal_port_send_buffer(in, b);
+        p += cp;
+        if (p == e) b->flags = MMAL_BUFFER_HEADER_FLAG_EOS;   /* <-- fixed */
+        mmal_port_send_buffer(dec_in, b);
     }
 
-/* 7. spin until egl_render hands the EGLImage to our callback --------- */
+/* 3. wait for decoder FORMAT_CHANGED ------------------------------ */
+    if ((st = wait_format_changed(dec->control, dec_out)))
+        { fprintf(stderr,"dec FORMAT_CHANGED %d\n",st); goto end; }
+
+/* 4. propagate format to fx_in ------------------------------------ */
+    mmal_format_copy(fx_in->format, dec_out->format);
+    if ((st = mmal_port_format_commit(fx_in)))
+        { fprintf(stderr,"fx_in commit %d\n",st); goto end; }
+
+/* 5. wait for fx FORMAT_CHANGED ----------------------------------- */
+    if ((st = wait_format_changed(fx->control, fx_out)))
+        { fprintf(stderr,"fx FORMAT_CHANGED %d\n",st); goto end; }
+
+/* 6. request opaque output from fx -------------------------------- */
+    fx_out->format->encoding = MMAL_ENCODING_OPAQUE;
+    if ((st = mmal_port_format_commit(fx_out)))
+        { fprintf(stderr,"fx_out commit %d\n",st); goto end; }
+
+/* 7. zero-copy on dec_out + fx_in + fx_out (NOT ren_in yet) ------- */
+    MMAL_PARAMETER_BOOLEAN_T zc = {{MMAL_PARAMETER_ZERO_COPY,sizeof zc},1};
+    mmal_port_parameter_set(dec_out, &zc.hdr);
+    mmal_port_parameter_set(fx_in , &zc.hdr);
+    mmal_port_parameter_set(fx_out, &zc.hdr);
+
+/* 8. connect decoder → fx ----------------------------------------- */
+    if (!(st = mmal_connection_create(&c1, dec_out, fx_in,
+            MMAL_CONNECTION_FLAG_TUNNELLING|MMAL_CONNECTION_FLAG_DIRECT)))
+        st = mmal_connection_enable(c1);
+    if (st) { fprintf(stderr,"c1 err %d\n",st); goto end; }
+
+/* 9. copy opaque format to ren_in (no commit yet) ----------------- */
+    mmal_format_copy(ren_in->format, fx_out->format);
+    {
+        MMAL_VIDEO_FORMAT_T *v = &ren_in->format->es->video;
+        v->crop.x = v->crop.y = 0;
+        v->width  = ALIGN_UP(v->crop.width , 32);
+        v->height = ALIGN_UP(v->crop.height, 16);
+    }
+
+/* 10. connect fx → egl_render first ------------------------------- */
+    if (!(st = mmal_connection_create(&c2, fx_out, ren_in,
+            MMAL_CONNECTION_FLAG_TUNNELLING|MMAL_CONNECTION_FLAG_DIRECT)))
+        st = mmal_connection_enable(c2);
+    if (st) { fprintf(stderr,"c2 err %d\n",st); goto end; }
+
+/* 11. NOW switch ren_in to zero-copy and add EGL hint ------------- */
+    mmal_port_parameter_set(ren_in, &zc.hdr);
+
+    MMAL_PARAMETER_EGL_IMAGE_T cfg = {{MMAL_PARAMETER_EGL_IMAGE,
+                                       sizeof cfg}, 1, {0}};
+    mmal_port_parameter_set(ren_in, &cfg.hdr);
+
+    ren_in->userdata = (void*)cb_buffer;
+    mmal_port_enable(ren_in, cb_buffer);
+
+/* 12. wait until callback fires ----------------------------------- */
     while (!image_ready) usleep(1000);
 
 end:
-    if (con)  mmal_connection_destroy(con);
-    if (ren)  mmal_component_destroy(ren);
-    if (dec)  mmal_component_destroy(dec);
+    if (c2)  mmal_connection_destroy(c2);
+    if (c1)  mmal_connection_destroy(c1);
+    if (ren) mmal_component_destroy(ren);
+    if (fx)  mmal_component_destroy(fx);
+    if (dec) mmal_component_destroy(dec);
     free(data);
     return NULL;
 }
+
 
 
 
