@@ -9,6 +9,9 @@
 #include <stdexcept>
 #include <assert.h>
 
+#include <cmath>
+
+
 // It's important to keep these unique so that glEnableVertexAttribArray only needs to be called a minimal amount as it is an expensive call on the raspberry pi
 #define MY_VERTEX_ARRAY 0
 #define MY_TEXCOORD_ARRAY 1
@@ -159,13 +162,13 @@ void VideoObjectGLES2::InitBuffers()
 
 	GLfloat verticesFullScreen[] =
 	{
-		-1, -0.9f,	// lower left
+		-1, -1,	// lower left
 		1, -1,
 		1, 1,
 
 		1, 1,
 		-1, 1,
-		-1, -0.9f,
+		-1, -1,
 	};
 
 	InitBuffersHelper(verticesFullScreen, sizeof(verticesFullScreen), &m_uVertexBufferFullScreen);
@@ -219,15 +222,20 @@ void VideoObjectGLES2::InitProjectionMatricesHelper(GLuint uProgram, GLfloat *pM
 	GL_ASSERT("glUniformMatrix4fv (matProjection)");
 }
 
+float stupidIncrementing = 0;
+
 void VideoObjectGLES2::InitViewMatrices()
 {
 	// NOW setup view matrices
+
+	stupidIncrementing += 0.016667f;
+	float flopp = fmod(stupidIncrementing,1.0f);
 
 	// "column major order" which means that the rows and columns are swapped.
 	// fZ is actually in the 4th columm, and 2nd row (not the 3rd column , 4th row as it may appear)
 	GLfloat mView[16] =
 	{
-		1, 0, 0, 0,
+		flopp, 0, 0, 0,
 		0, 1, 0, 0,
 		0, 0, 1, 0,
 		0, 0, 0, 1
@@ -410,6 +418,8 @@ void VideoObjectGLES2::InitTextures()
 
 void VideoObjectGLES2::DrawRGBA()
 {
+	InitViewMatrices();
+
 	glUseProgram(m_ProgramRGBA);
 
 	// setting active texture and binding the current texture only needs to be done once for this demo,
