@@ -1,1 +1,3 @@
 texturecube
+*.o
+*.d
