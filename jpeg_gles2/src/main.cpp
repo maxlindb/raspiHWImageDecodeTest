@@ -108,16 +108,22 @@ int main(int argc, char **argv)
 
 	// tell jpeg decoder what the buffer size needs to be (mandatory)
 	pJPEG->SetInputBufSizeHint(stSizeBytes);
+	//pJPEG->SetInputBufSizeHint(1024 * 500);
 
 	unsigned int uStartTime = RefreshTimer();
 	unsigned int uFramesDisplayed = 0;
 
+
+	
 	// main loop here, run as fast as possible to benchmark
 	while (!g_bQuitFlag)
 	{
 		// decode
-		pJPEG->DecompressJPEGStart(pBufJPEG, stSizeBytes);
-		pJPEG->WaitJPEGDecompressorReady();
+		if(uFramesDisplayed % 25 == 0) {
+			pJPEG->DecompressJPEGStart(pBufJPEG, stSizeBytes);
+			if(uFramesDisplayed < 600) pJPEG->WaitJPEGDecompressorReady();
+		}
+
 
 		// render
 		pVideo->RenderFrame();

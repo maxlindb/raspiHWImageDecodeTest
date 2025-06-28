@@ -1,0 +1,1 @@
+g++ -o extbuftest extbuftest.cpp -lEGL -lGLESv2 -ldrm -lgbm
