@@ -13,7 +13,20 @@
 //#include <xf86drmMode.h>
 #include <libdrm/drm.h>
 #include <libdrm/drm_mode.h>
+#include <libdrm/drm_fourcc.h> // Add this line
 #include <gbm.h>        // GBM (Generic Buffer Management) is often used with DRM/EGL
+
+// Add these definitions if your gbm.h or drm.h doesn't define them
+// These values are standard for DRM/GBM FourCC codes and usage flags.
+#ifndef GBM_FORMAT_ARGB8888
+#define GBM_FORMAT_ARGB8888 DRM_FORMAT_ARGB8888 // GBM format usually mirrors DRM format
+#endif
+
+#ifndef GBM_BO_USE_TEXTURE
+#define GBM_BO_USE_TEXTURE (1 << 4) // Common value for this flag in GBM
+#endif
+
+
 
 // EGL includes
 #include <EGL/egl.h>
@@ -48,6 +61,7 @@ GLuint fragment_shader = 0;
 GLint position_loc = -1;
 GLint texcoord_loc = -1;
 GLint sampler_loc = -1;
+
 
 
 // --- Helper function for EGL error checking ---
@@ -253,7 +267,7 @@ bool init_drm_gbm(int width, int height) {
 
     // Allocate a GBM buffer object that can be used for zero-copy
     // Use DRM_FORMAT_ARGB8888 for 32-bit RGBA. GBM_BO_USE_LINEAR for CPU access.
-    gbm_bo = gbm_bo_create(gbm_dev, width, height, DRM_FORMAT_ARGB8888, GBM_BO_USE_TEXTURE | GBM_BO_USE_LINEAR);
+    gbm_bo = gbm_bo_create(gbm_dev, width, height, GBM_FORMAT_ARGB8888, /*GBM_BO_USE_TEXTURE |*/ GBM_BO_USE_LINEAR);
     if (!gbm_bo) {
         std::cerr << "ERROR: Failed to create GBM buffer object. Errno: " << errno << std::endl;
         gbm_device_destroy(gbm_dev); gbm_dev = nullptr;
@@ -264,6 +278,7 @@ bool init_drm_gbm(int width, int height) {
 
     return true;
 }
+
 
 // --- Create Texture from DMA_BUF ---
 bool create_dma_buf_texture(int width, int height) {
