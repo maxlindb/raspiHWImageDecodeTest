@@ -159,13 +159,13 @@ void VideoObjectGLES2::InitBuffers()
 
 	GLfloat verticesFullScreen[] =
 	{
-		-1, -1,	// lower left
+		-1, -0.9f,	// lower left
 		1, -1,
 		1, 1,
 
 		1, 1,
 		-1, 1,
-		-1, -1,
+		-1, -0.9f,
 	};
 
 	InitBuffersHelper(verticesFullScreen, sizeof(verticesFullScreen), &m_uVertexBufferFullScreen);
